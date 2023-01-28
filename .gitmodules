@@ -1,0 +1,9 @@
+[submodule "thirdparty/fmt"]
+	path = thirdparty/fmt
+	url = https://github.com/fmtlib/fmt.git
+[submodule "thirdparty/FreeRTOS-Kernel"]
+	path = thirdparty/FreeRTOS-Kernel
+	url = https://github.com/FreeRTOS/FreeRTOS-Kernel.git
+[submodule "thirdparty/pico-ssd1306"]
+	path = thirdparty/pico-ssd1306
+	url = https://github.com/Harbys/pico-ssd1306.git
