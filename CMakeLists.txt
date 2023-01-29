@@ -21,8 +21,7 @@ AddVersionHeader(hot-plate-version HotPlate)
 add_subdirectory(thirdparty/fmt)
 add_subdirectory(thirdparty/pico-ssd1306)
 
-file(GLOB_RECURSE pico_sources CONFIGURE_DEPENDS
-    src/*.cpp src/*.c thirdparty/BME68x-Sensor-API/bme68x.c)
+file(GLOB_RECURSE pico_sources CONFIGURE_DEPENDS src/*.cpp src/*.c )
 file(GLOB_RECURSE pico_headers CONFIGURE_DEPENDS src/*.hpp src/*.h)
 
 add_executable(HotPlate ${pico_sources} ${pico_headers})

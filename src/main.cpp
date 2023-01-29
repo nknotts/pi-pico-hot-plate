@@ -3,6 +3,7 @@
 #include <b1g/log/Logger.hpp>
 #include <b1g/pid/pid.hpp>
 #include <b1g/sensor/MAX31855.hpp>
+#include <b1g/utz/utz.h>
 
 #include <libHotPlate_version.h>
 
@@ -129,6 +130,14 @@ struct HeaterState {
 
 HeaterState heater_state;
 SemaphoreHandle_t heater_state_mutex;
+
+uzone_t get_my_time_zone() {
+	uzone_t zone;
+	get_zone_by_name("New York", &zone);
+	return zone;
+}
+
+const uzone_t LOCAL_TIME_ZONE = get_my_time_zone();
 
 template <typename Type>
 Type function_guard(SemaphoreHandle_t mtx, std::function<Type()> fn) {
@@ -485,15 +494,42 @@ void udp_recv_cb(void*, udp_pcb*, pbuf* buf, const ip4_addr* ip, uint16_t port) 
 const char* heater_state_type_name(HeaterStateType type) {
 	switch (type) {
 	case HeaterStateType::Idle:
-		return "Idle";
+		return "idle";
 	case HeaterStateType::Pwm:
-		return "Pwm";
+		return "pwm";
 	case HeaterStateType::Temperature:
-		return "Temperature";
+		return "temperature";
 	case HeaterStateType::Curve:
-		return "Curve";
+		return "curve";
 	}
-	return "Unknown";
+	return "UNKNOWN";
+}
+
+tm convert_date(const datetime_t& date) {
+	struct tm out {};
+	out.tm_year = date.year - 1900;
+	out.tm_mon = date.month - 1;
+	out.tm_mday = date.day;
+	out.tm_wday = date.dotw;
+	out.tm_hour = date.hour;
+	out.tm_min = date.min;
+	out.tm_sec = date.sec;
+	out.tm_isdst = false;
+	return out;
+}
+
+std::optional<std::tm> get_time_tm() {
+	datetime_t date_now;
+	if (!rtc_get_datetime(&date_now)) {
+		return std::nullopt;
+	}
+
+	return convert_date(date_now);
+}
+
+std::optional<std::time_t> get_time_t() {
+	auto tm = get_time_tm();
+	return tm.has_value() ? std::optional(mktime(&tm.value())) : std::nullopt;
 }
 
 void network_task(__unused void* params) {
@@ -540,21 +576,10 @@ void network_task(__unused void* params) {
 			vTaskDelayUntil(&last_wake_time, 1000);
 
 			auto tick_now = xTaskGetTickCount();
-			datetime_t date_now;
-			if (!rtc_get_datetime(&date_now)) {
+			auto time_now = get_time_t();
+			if (!time_now) {
 				continue;
 			}
-
-			struct tm tm_now {};
-			tm_now.tm_year = date_now.year - 1900;
-			tm_now.tm_mon = date_now.month - 1;
-			tm_now.tm_mday = date_now.day;
-			tm_now.tm_wday = date_now.dotw;
-			tm_now.tm_hour = date_now.hour;
-			tm_now.tm_min = date_now.min;
-			tm_now.tm_sec = date_now.sec;
-			tm_now.tm_isdst = false;
-			auto time_now = mktime(&tm_now);
 
 			auto state = function_guard<HeaterState>(heater_state_mutex, [] { return heater_state; });
 			if (state.measured_temperature_C.has_value()) {
@@ -565,14 +590,14 @@ void network_task(__unused void* params) {
 
 			switch (state.state_type) {
 			case HeaterStateType::Temperature:
-				snprintf(optional_json_buf, sizeof(optional_json_buf), ", \"target_temperature_C\": %u", state.target_temperature_C);
+				snprintf(optional_json_buf, sizeof(optional_json_buf), ", \"target-temperature-C\": %u", state.target_temperature_C);
 				break;
 			case HeaterStateType::Curve: {
 				TickType_t elapsed = state.current_tick - state.curve_tbegin;
 				TickType_t remain = (state.current_tick < state.curve_tend) ? (state.curve_tend - state.current_tick) : 0;
 				snprintf(optional_json_buf,
 				         sizeof(optional_json_buf),
-				         ", \"target_temperature_C\": %u, \"curve_elapsed_ms\": %u, \"curve_remaining_ms\": %u",
+				         ", \"target-temperature-C\": %u, \"curve-elapsed-ms\": %u, \"curve-remaining-ms\": %u",
 				         state.target_temperature_C,
 				         elapsed,
 				         remain);
@@ -584,9 +609,9 @@ void network_task(__unused void* params) {
 			auto len = snprintf(
 			    json_buf,
 			    sizeof(json_buf),
-			    "{\"id\": %u, \"ttag_s\": %lld, \"uptime_ms\": %u, \"heater_state\": \"%s\", \"pwm_percent\": %u, \"measured_temperatre_C\": %s%s }\n",
+			    "{\"id\": %u, \"ttag-s\": %lld, \"uptime-ms\": %u, \"heater-state\": \"%s\", \"pwm-percent\": %u, \"measured-temperatre-C\": %s%s }\n",
 			    ++sequence_number,
-			    time_now,
+			    time_now.value(),
 			    state.current_tick,
 			    heater_state_type_name(state.state_type),
 			    state.pwm_percent,
@@ -667,10 +692,39 @@ void get_ip_address_str(char* buf, size_t max_len) {
 	}
 }
 
-void get_datetime_str(char* buf, size_t max_len) {
+time_t time_offset(const datetime_t& date) {
+	udatetime_t dt = {0};
+	dt.date.year = date.year - 2000;
+	dt.date.month = date.month;
+	dt.date.dayofmonth = date.day;
+	dt.date.dayofweek = date.dotw;
+	dt.time.hour = date.hour;
+	dt.time.minute = date.min;
+	dt.time.second = date.sec;
+
+	uoffset_t offset;
+	get_current_offset(&LOCAL_TIME_ZONE, &dt, &offset);
+	return offset.hours * 3600 + offset.minutes * 60 * (std::signbit(offset.hours) ? 1 : -1);
+}
+
+std::optional<tm> get_local_time() {
 	datetime_t date_now;
 	if (rtc_get_datetime(&date_now)) {
-		datetime_to_str(buf, max_len, &date_now);
+		auto tm_utc = convert_date(date_now);
+		auto t_utc = mktime(&tm_utc);
+		auto t_local = t_utc + time_offset(date_now);
+		tm tm_local;
+		gmtime_r(&t_local, &tm_local);
+		return tm_local;
+	} else {
+		return std::nullopt;
+	}
+};
+
+void get_datetime_str(char* buf, size_t max_len) {
+	auto date = get_local_time();
+	if (date.has_value()) {
+		strftime(buf, max_len, "%Y-%m-%d %H:%M:%S", &date.value());
 	} else {
 		snprintf(buf, max_len, "unknown");
 	}
@@ -679,9 +733,9 @@ void get_datetime_str(char* buf, size_t max_len) {
 void get_temperature_meas_str(char* buf, size_t max_len) {
 	auto data = function_guard<std::optional<sensor::MAX31855::Data>>(temperature_mutex, [] { return temperature_data; });
 	if (data.has_value()) {
-		snprintf(buf, max_len, "%2.1f", data->temperature_C);
+		snprintf(buf, max_len, "%3.0f", data->temperature_C);
 	} else {
-		snprintf(buf, max_len, "????");
+		snprintf(buf, max_len, "???");
 	}
 }
 
@@ -700,23 +754,36 @@ void lcd_task(__unused void* params) {
 
 	char ip_str_buf[32];
 	char datetime_str_buf[32];
+	char heat_str_buf[32];
 	char temperature_meas_str_buf[8];
-	char line_buf[32] = {};
-	auto counter = 0;
+	char curve_time_buf[32];
 	auto last_wake_time = xTaskGetTickCount();
 	while (true) {
 		auto state = function_guard<HeaterState>(heater_state_mutex, [] { return heater_state; });
-
 		get_ip_address_str(ip_str_buf, sizeof(ip_str_buf));
 		get_datetime_str(datetime_str_buf, sizeof(datetime_str_buf));
 		get_temperature_meas_str(temperature_meas_str_buf, sizeof(temperature_meas_str_buf));
 
-		snprintf(line_buf, sizeof(line_buf), "Uptime: %d", counter++);
+		log::info("{}", datetime_str_buf);
+
+		snprintf(heat_str_buf, sizeof(heat_str_buf), "PWM:  %3u %% -> %s/%3u C",
+		         state.pwm_percent, temperature_meas_str_buf, state.target_temperature_C);
 
 		display.clear();
-		drawText(&display, font_b1g_5x8, ip_str_buf, 0, 0);
-		drawText(&display, font_b1g_5x8, datetime_str_buf, 0, 8);
-		drawText(&display, font_b1g_5x8, line_buf, 0, 16);
+		drawText(&display, font_b1g_5x8, "IP: ", 0, 0);
+		drawText(&display, font_b1g_5x8, ip_str_buf, 30, 0);
+		drawText(&display, font_b1g_5x8, "Date: ", 0, 8);
+		drawText(&display, font_b1g_5x8, datetime_str_buf, 30, 8);
+		drawText(&display, font_b1g_5x8, "Mode: ", 0, 16);
+		drawText(&display, font_b1g_5x8, heater_state_type_name(state.state_type), 30, 16);
+		if (state.state_type == HeaterStateType::Curve) {
+			snprintf(curve_time_buf, sizeof(curve_time_buf), "%3d/%3d(%3dr)",
+			         (state.current_tick - state.curve_tbegin) / 1000,
+			         (state.curve_tend - state.curve_tbegin) / 1000,
+			         (state.curve_tend - state.current_tick) / 1000);
+			drawText(&display, font_b1g_5x8, curve_time_buf, 59, 16);
+		}
+		drawText(&display, font_b1g_5x8, heat_str_buf, 0, 24);
 		display.sendBuffer();
 
 		vTaskDelayUntil(&last_wake_time, 1000);
